@@ -15,10 +15,13 @@
 # limitations under the License.
 
 """Provides a seam for user-related services."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 import logging
 
 import feconf
+import python_utils
 import utils
 
 from google.appengine.api import users
@@ -37,19 +40,6 @@ def create_login_url(slug):
     return users.create_login_url(
         dest_url=utils.set_url_query_parameter(
             feconf.SIGNUP_URL, 'return_url', slug))
-
-
-def create_logout_url(slug):
-    """Creates a logout url.
-
-    Args:
-        slug: str. The URL to redirect to after logout.
-
-    Returns:
-        str. The correct logout URL that includes the page to redirect to.
-    """
-    logout_url = utils.set_url_query_parameter('/logout', 'return_url', slug)
-    return logout_url
 
 
 def get_current_user():
@@ -84,7 +74,7 @@ def get_user_id_from_email(email):
     key = _FakeUser(id=email, user=fake_user).put()
     obj = _FakeUser.get_by_id(key.id())
     user_id = obj.user.user_id()
-    return unicode(user_id) if user_id else None
+    return python_utils.convert_to_bytes(user_id) if user_id else None
 
 
 def get_current_user_id():

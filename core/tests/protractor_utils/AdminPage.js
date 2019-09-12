@@ -32,7 +32,7 @@ var AdminPage = function() {
   var updateFormName = element(by.css('.protractor-update-form-name'));
   var updateFormSubmit = element(by.css('.protractor-update-form-submit'));
   var roleSelect = element(by.css('.protractor-update-form-role-select'));
-  var statusMessage = element(by.css('[ng-if="statusMessage"]'));
+  var statusMessage = element(by.css('[ng-if="$ctrl.statusMessage"]'));
 
   // The reload functions are used for mobile testing
   // done via Browserstack. These functions may cause
@@ -125,7 +125,7 @@ var AdminPage = function() {
       return saveConfigProperty(
         x, propertyName, objectType, editingInstructions);
     }).then(function(results) {
-      var success = false;
+      var success = null;
       for (var i = 0; i < results.length; i++) {
         success = success || results[i];
       }

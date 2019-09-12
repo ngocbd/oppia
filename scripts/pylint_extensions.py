@@ -17,14 +17,41 @@
 """Implements additional custom Pylint checkers to be used as part of
 presubmit checks.
 """
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
-import astroid
-import docstrings_checker  # pylint: disable=relative-import
+import os
+import re
+import sys
 
-from pylint import checkers
-from pylint import interfaces
-from pylint.checkers import typecheck
-from pylint.checkers import utils as checker_utils
+import python_utils
+from . import docstrings_checker
+
+_PARENT_DIR = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+_PYLINT_PATH = os.path.join(_PARENT_DIR, 'oppia_tools', 'pylint-1.9.4')
+sys.path.insert(0, _PYLINT_PATH)
+
+# pylint: disable=wrong-import-order
+# pylint: disable=wrong-import-position
+import astroid  # isort:skip
+from pylint import checkers  # isort:skip
+from pylint import interfaces  # isort:skip
+from pylint.checkers import typecheck  # isort:skip
+from pylint.checkers import utils as checker_utils  # isort:skip
+# pylint: enable=wrong-import-position
+# pylint: enable=wrong-import-order
+
+
+def read_from_node(node):
+    """Returns the data read from the ast node in unicode form.
+
+    Args:
+        node: astroid.scoped_nodes.Function. Node to access module content.
+
+    Returns:
+        list(str). The data read from the ast node.
+    """
+    return list(node.stream().readlines())
 
 
 class ExplicitKeywordArgsChecker(checkers.BaseChecker):
@@ -68,9 +95,6 @@ class ExplicitKeywordArgsChecker(checkers.BaseChecker):
 
         # Build the set of keyword arguments and count the positional arguments.
         call_site = astroid.arguments.CallSite.from_call(node)
-        if call_site.has_invalid_arguments() or (
-                call_site.has_invalid_keywords()):
-            return
 
         num_positional_args = len(call_site.positional_arguments)
         keyword_args = list(call_site.keyword_arguments.keys())
@@ -106,10 +130,7 @@ class ExplicitKeywordArgsChecker(checkers.BaseChecker):
         # been called explicitly.
         for [(name, defval), _] in parameters:
             if defval:
-                if name is None:
-                    display_name = '<tuple>'
-                else:
-                    display_name = repr(name)
+                display_name = repr(name)
 
                 if name not in keyword_args and (
                         num_positional_args_unused > (
@@ -121,10 +142,7 @@ class ExplicitKeywordArgsChecker(checkers.BaseChecker):
                     try:
                         func_name = node.func.attrname
                     except AttributeError:
-                        try:
-                            func_name = node.func.name
-                        except AttributeError:
-                            func_name = node.func
+                        func_name = node.func.name
 
                     self.add_message(
                         'non-explicit-keyword-args', node=node,
@@ -161,32 +179,33 @@ class HangingIndentChecker(checkers.BaseChecker):
         Args:
             node: astroid.scoped_nodes.Function. Node to access module content.
         """
-        file_content = node.stream().readlines()
+        file_content = read_from_node(node)
         file_length = len(file_content)
         exclude = False
-        for line_num in xrange(file_length):
+        for line_num in python_utils.RANGE(file_length):
             line = file_content[line_num].lstrip().rstrip()
-            if line.startswith('"""') and not line.endswith('"""'):
+            # The source files are read as bytes, hence the b' prefix.
+            if line.startswith(b'"""') and not line.endswith(b'"""'):
                 exclude = True
-            if line.endswith('"""'):
+            if line.endswith(b'"""'):
                 exclude = False
-            if line.startswith('#') or exclude:
+            if line.startswith(b'#') or exclude:
                 continue
             line_length = len(line)
             bracket_count = 0
-            for char_num in xrange(line_length):
+            for char_num in python_utils.RANGE(line_length):
                 char = line[char_num]
-                if char == '(':
+                if char == b'(':
                     if bracket_count == 0:
                         position = char_num
                     bracket_count += 1
-                elif char == ')' and bracket_count > 0:
+                elif char == b')' and bracket_count > 0:
                     bracket_count -= 1
             if bracket_count > 0 and position + 1 < line_length:
                 content = line[position + 1:]
-                if not len(content) or not ',' in content:
+                if not len(content) or not b',' in content:
                     continue
-                split_list = content.split(', ')
+                split_list = content.split(b', ')
                 if len(split_list) == 1 and not any(
                         char.isalpha() for char in split_list[0]):
                     continue
@@ -442,8 +461,6 @@ class DocstringParameterChecker(checkers.BaseChecker):
             return
 
         func_node = node.frame()
-        if not isinstance(func_node, astroid.FunctionDef):
-            return
 
         doc = docstrings_checker.docstringify(func_node.doc)
         if not doc.is_valid() and self.config.accept_no_return_doc:
@@ -474,19 +491,13 @@ class DocstringParameterChecker(checkers.BaseChecker):
                 method definition in the AST.
         """
         func_node = node.frame()
-        if not isinstance(func_node, astroid.FunctionDef):
-            return
 
         doc = docstrings_checker.docstringify(func_node.doc)
         if not doc.is_valid() and self.config.accept_no_yields_doc:
             return
 
-        if doc.supports_yields:
-            doc_has_yields = doc.has_yields()
-            doc_has_yields_type = doc.has_yields_type()
-        else:
-            doc_has_yields = doc.has_returns()
-            doc_has_yields_type = doc.has_rtype()
+        doc_has_yields = doc.has_yields()
+        doc_has_yields_type = doc.has_yields_type()
 
         if not doc_has_yields:
             self.add_message(
@@ -647,7 +658,6 @@ class DocstringParameterChecker(checkers.BaseChecker):
     def _handle_no_raise_doc(self, excs, node):
         """Checks whether the raised exception in a function has been
         documented, add a message otherwise.
-
         Args:
             excs: list(str). A list of exception types.
             node: astroid.scoped_nodes.Function. Node to access module content.
@@ -696,8 +706,8 @@ class ImportOnlyModulesChecker(checkers.BaseChecker):
         modules are imported. It then adds a message accordingly.
 
         Args:
-            node: astroid.scoped_nodes.Function. Node for a function or method
-                definition in AST.
+            node: astroid.node_classes.ImportFrom. Node for a import-from
+                statement in the AST.
         """
 
         try:
@@ -721,8 +731,6 @@ class ImportOnlyModulesChecker(checkers.BaseChecker):
                     node=node,
                     args=(name, modname),
                 )
-            except astroid.AstroidBuildingException:
-                pass
 
 
 class BackslashContinuationChecker(checkers.BaseChecker):
@@ -749,12 +757,11 @@ class BackslashContinuationChecker(checkers.BaseChecker):
         Args:
             node: astroid.scoped_nodes.Function. Node to access module content.
         """
-        with node.stream() as stream:
-            file_content = stream.readlines()
-            for (line_num, line) in enumerate(file_content):
-                if line.rstrip('\r\n').endswith('\\'):
-                    self.add_message(
-                        'backslash-continuation', line=line_num + 1)
+        file_content = read_from_node(node)
+        for (line_num, line) in enumerate(file_content):
+            if line.rstrip(b'\r\n').endswith(b'\\'):
+                self.add_message(
+                    'backslash-continuation', line=line_num + 1)
 
 
 class FunctionArgsOrderChecker(checkers.BaseChecker):
@@ -794,6 +801,135 @@ class FunctionArgsOrderChecker(checkers.BaseChecker):
             self.add_message('function-args-order-cls', node=node)
 
 
+class RestrictedImportChecker(checkers.BaseChecker):
+    """Custom pylint checker which checks layers importing modules
+    from their respective restricted layers.
+    """
+
+    __implements__ = interfaces.IAstroidChecker
+    name = 'invalid-import'
+    priority = -1
+    msgs = {
+        'C0009': (
+            'Importing %s layer in %s layer is prohibited.',
+            'invalid-import',
+            'Storage layer and domain layer must not import'
+            'domain layer and controller layer respectively.'),
+    }
+
+    def visit_import(self, node):
+        """Visits every import statement in the file.
+
+        Args:
+         node: astroid.node_classes.Import. Node for a import statement
+                 in the AST.
+        """
+
+        modnode = node.root()
+        names = [name for name, _ in node.names]
+        # Checks import of domain layer in storage layer.
+        if 'oppia.core.storage' in modnode.name and not '_test' in modnode.name:
+            if any('core.domain' in name for name in names):
+                self.add_message(
+                    'invalid-import',
+                    node=node,
+                    args=('domain', 'storage'),
+                )
+        # Checks import of controller layer in domain layer.
+        if 'oppia.core.domain' in modnode.name and not '_test' in modnode.name:
+            if any('core.controllers' in name for name in names):
+                self.add_message(
+                    'invalid-import',
+                    node=node,
+                    args=('controller', 'domain'),
+                )
+
+    def visit_importfrom(self, node):
+        """Visits all import-from statements in a python file and checks that
+        modules are imported. It then adds a message accordingly.
+
+        Args:
+            node: astroid.node_classes.ImportFrom. Node for a import-from
+                statement in the AST.
+        """
+
+        modnode = node.root()
+        if 'oppia.core.storage' in modnode.name and not '_test' in modnode.name:
+            if 'core.domain' in node.modname:
+                self.add_message(
+                    'invalid-import',
+                    node=node,
+                    args=('domain', 'storage'),
+                )
+        if 'oppia.core.domain' in modnode.name and not '_test' in modnode.name:
+            if 'core.controllers' in node.modname:
+                self.add_message(
+                    'invalid-import',
+                    node=node,
+                    args=('controller', 'domain'),
+                )
+
+
+class SingleCharAndNewlineAtEOFChecker(checkers.BaseChecker):
+    """Checker for single character files and newline at EOF."""
+
+    __implements__ = interfaces.IRawChecker
+    name = 'newline-at-eof'
+    priority = -1
+    msgs = {
+        'C0007': (
+            'Files should end in a single newline character.',
+            'newline-at-eof',
+            'Please enter a single newline at the end of the file.'),
+        'C0008': (
+            'Only one character in file',
+            'only-one-character',
+            'Files with only one character are not allowed.'),
+    }
+
+    def process_module(self, node):
+        """Process a module.
+
+        Args:
+            node: astroid.scoped_nodes.Function. Node to access module content.
+        """
+
+        file_content = read_from_node(node)
+        file_length = len(file_content)
+
+        if file_length == 1 and len(file_content[0]) == 1:
+            self.add_message('only-one-character', line=file_length)
+        if file_length >= 2 and not re.search(r'[^\n]\n', file_content[-1]):
+            self.add_message('newline-at-eof', line=file_length)
+
+
+class SingleSpaceAfterYieldChecker(checkers.BaseChecker):
+  """Checks if only one space is used after a yield statement."""
+  __implements__ = interfaces.IRawChecker
+
+  name = 'single-space-after-yield'
+  priority = -1
+  msgs = {
+      'C0010': (
+          'Not using a single space after yield statement.',
+          'single-space-after-yield',
+          'Ensure a single space is used after yield statement.',
+      ),
+  }
+
+  def process_module(self, node):
+    """Process a module to ensure that yield keywords are followed by exactly
+    one space, so matching 'yield *' where * is not a whitespace character.
+
+      Args:
+          node: astroid.scoped_nodes.Function. Node to access module content.
+    """
+    file_content = read_from_node(node)
+    for (line_num, line) in enumerate(file_content):
+      source_line = line.lstrip()
+      if source_line.startswith('yield') and not re.search(r'^(yield) \S', source_line):
+        self.add_message('single-space-after-yield', line=line_num + 1)
+
 def register(linter):
     """Registers the checker with pylint.
 
@@ -806,3 +942,6 @@ def register(linter):
     linter.register_checker(ImportOnlyModulesChecker(linter))
     linter.register_checker(BackslashContinuationChecker(linter))
     linter.register_checker(FunctionArgsOrderChecker(linter))
+    linter.register_checker(RestrictedImportChecker(linter))
+    linter.register_checker(SingleCharAndNewlineAtEOFChecker(linter))
+    linter.register_checker(SingleSpaceAfterYieldChecker(linter))

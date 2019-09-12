@@ -13,29 +13,52 @@
 # limitations under the License.
 
 """Tests for custom landing pages."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 from core.tests import test_utils
 import feconf
 
 
-class FractionLandingPageTest(test_utils.GenericTestBase):
-    """Test for showing landing page for fractions."""
+class FractionLandingRedirectPageTest(test_utils.GenericTestBase):
+    """Test for redirecting landing page for fractions."""
 
-    def test_fraction_landing_page_without_viewer_type(self):
-        """Test for showing the landing page for fractions,
-        without any viewer type should redirect to teacher type.
+    def test_old_fractions_landing_url_without_viewer_type(self):
+        """Test to validate the old Fractions landing url without viewerType
+        redirects to the new Fractions landing url.
         """
         response = self.get_html_response(
             feconf.FRACTIONS_LANDING_PAGE_URL, expected_status_int=302)
-        response.mustcontain('/fractions_landing/teachers')
+        self.assertEqual(
+            'http://localhost/learn/maths/fractions',
+            response.headers['location'])
 
-    def test_fraction_landing_page_with_viewer_type(self):
-        """Test for showing the landing page for fractions,
-        with student viewer type should respond student type.
+    def test_old_fraction_landing_url_with_viewer_type(self):
+        """Test to validate the old Fractions landing url with viewerType
+        redirects to the new Fractions landing url.
         """
         response = self.get_html_response(
-            '%s?viewerType=student' % (feconf.FRACTIONS_LANDING_PAGE_URL))
-        response.mustcontain('/fractions_landing/student')
+            '%s?viewerType=student' % feconf.FRACTIONS_LANDING_PAGE_URL,
+            expected_status_int=302)
+        self.assertEqual(
+            'http://localhost/learn/maths/fractions',
+            response.headers['location'])
+
+
+class TopicLandingPageTest(test_utils.GenericTestBase):
+    """Test for showing landing pages."""
+
+    def test_invalid_subject_landing_page_leads_to_404(self):
+        self.get_html_response(
+            '/learn/invalid_subject/fractions', expected_status_int=404)
+
+    def test_invalid_topic_landing_page_leads_to_404(self):
+        self.get_html_response(
+            '/learn/maths/invalid_topic', expected_status_int=404)
+
+    def test_valid_subject_and_topic_loads_correctly(self):
+        response = self.get_html_response('/learn/maths/fractions')
+        response.mustcontain('<topic-landing-page></topic-landing-page>')
 
 
 class StewardsLandingPageTest(test_utils.GenericTestBase):
@@ -46,20 +69,20 @@ class StewardsLandingPageTest(test_utils.GenericTestBase):
         response = self.get_html_response(
             feconf.CUSTOM_NONPROFITS_LANDING_PAGE_URL)
         response.mustcontain(
-            'Let\'s work together to make compelling educational')
+            '<stewards-landing-page></stewards-landing-page>')
 
     def test_parents_landing_page(self):
         response = self.get_html_response(
             feconf.CUSTOM_PARENTS_LANDING_PAGE_URL)
         response.mustcontain(
-            'Help your child learn with our free, engaging lessons')
+            '<stewards-landing-page></stewards-landing-page>')
 
     def test_teachers_landing_page(self):
         response = self.get_html_response(
             feconf.CUSTOM_TEACHERS_LANDING_PAGE_URL)
-        response.mustcontain('Oppia\'s free, personalized lessons are a great')
+        response.mustcontain('<stewards-landing-page></stewards-landing-page>')
 
     def test_volunteers_landing_page(self):
         response = self.get_html_response(
             feconf.CUSTOM_VOLUNTEERS_LANDING_PAGE_URL)
-        response.mustcontain('Help improve access to high-quality education')
+        response.mustcontain('<stewards-landing-page></stewards-landing-page>')

@@ -1,6 +1,4 @@
-# coding: utf-8
-#
-# Copyright 2018 The Oppia Authors. All Rights Reserved.
+# Copyright 2019 The Oppia Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for feedback related jobs."""
+"""Tests for Feedback-related jobs."""
+from __future__ import absolute_import # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
+
+import ast
 
 from core.domain import feedback_jobs_one_off
 from core.platform import models
@@ -24,80 +26,105 @@ from core.tests import test_utils
 taskqueue_services = models.Registry.import_taskqueue_services()
 
 
-class PopulateMessageCountOneOffJobTest(test_utils.GenericTestBase):
-    """Tests for PopulateMessageCountOneOffJob."""
+class GeneralFeedbackThreadUserOneOffJobTest(test_utils.GenericTestBase):
+    """Tests for GeneralFeedbackThreadUser migration."""
 
-    def setUp(self):
-        super(PopulateMessageCountOneOffJobTest, self).setUp()
-        feedback_models.GeneralFeedbackThreadModel(
-            id='exp1.thread1', entity_id='exp1', entity_type='state1',
-            original_author_id='author', message_count=None,
-            status=feedback_models.STATUS_CHOICES_OPEN,
-            subject='subject', summary='summary', has_suggestion=False,
-            ).put()
-        feedback_models.GeneralFeedbackMessageModel(
-            id='exp1.thread1.1', thread_id='exp1.thread1', message_id=1,
-            author_id='author', text='message text').put()
-        feedback_models.GeneralFeedbackMessageModel(
-            id='exp1.thread1.2', thread_id='exp1.thread1', message_id=2,
-            author_id='author', text='message text').put()
-        feedback_models.GeneralFeedbackThreadModel(
-            id='exp2.thread2', entity_id='exp2', entity_type='state2',
-            original_author_id='author', message_count=None,
-            status=feedback_models.STATUS_CHOICES_OPEN,
-            subject='subject', summary='summary', has_suggestion=False,
-            ).put()
-        feedback_models.GeneralFeedbackMessageModel(
-            id='exp2.thread2.1', thread_id='exp2.thread2', message_id=1,
-            author_id='author', text='message text').put()
-        feedback_models.GeneralFeedbackThreadModel(
-            id='exp3.thread3', entity_id='exp3', entity_type='state3',
-            original_author_id='author', message_count=None,
-            status=feedback_models.STATUS_CHOICES_OPEN,
-            subject='subject', summary='summary', has_suggestion=False,
-            ).put()
-        feedback_models.GeneralFeedbackThreadModel(
-            id='exp4.thread4', entity_id='exp4', entity_type='state4',
-            original_author_id='author', message_count=1,
-            status=feedback_models.STATUS_CHOICES_OPEN,
-            subject='subject', summary='summary', has_suggestion=False,
-            ).put()
-        feedback_models.GeneralFeedbackMessageModel(
-            id='exp4.thread4.1', thread_id='exp4.thread4', message_id=1,
-            author_id='author', text='message text').put()
+    ONE_OFF_JOB_MANAGERS_FOR_TESTS = [
+        feedback_jobs_one_off.GeneralFeedbackThreadUserOneOffJob]
 
     def _run_one_off_job(self):
         """Runs the one-off MapReduce job."""
         job_id = (
-            feedback_jobs_one_off
-            .PopulateMessageCountOneOffJob.create_new())
-        feedback_jobs_one_off.PopulateMessageCountOneOffJob.enqueue(
-            job_id)
+            feedback_jobs_one_off.GeneralFeedbackThreadUserOneOffJob
+            .create_new())
+        feedback_jobs_one_off.GeneralFeedbackThreadUserOneOffJob.enqueue(job_id)
         self.assertEqual(
             self.count_jobs_in_taskqueue(
                 taskqueue_services.QUEUE_NAME_ONE_OFF_JOBS), 1)
         self.process_and_flush_pending_tasks()
-        return feedback_jobs_one_off.PopulateMessageCountOneOffJob.get_output(
-            job_id)
+        stringified_output = (
+            feedback_jobs_one_off.GeneralFeedbackThreadUserOneOffJob
+            .get_output(job_id))
 
-    def test_message_count_job(self):
-        thread1 = feedback_models.GeneralFeedbackThreadModel.get('exp1.thread1')
-        thread2 = feedback_models.GeneralFeedbackThreadModel.get('exp2.thread2')
-        thread3 = feedback_models.GeneralFeedbackThreadModel.get('exp3.thread3')
-        thread1.message_count = None
-        thread1.put()
-        thread2.message_count = None
-        thread2.put()
-        thread3.message_count = None
-        thread3.put()
-        self.assertEqual(thread1.message_count, None)
-        self.assertEqual(thread2.message_count, None)
-        self.assertEqual(thread3.message_count, None)
-        job_output = self._run_one_off_job()
-        self.assertEqual(job_output, [u'[u\'NO-OP\', 1]', u'[u\'SUCCESS\', 3]'])
-        thread1 = feedback_models.GeneralFeedbackThreadModel.get('exp1.thread1')
-        thread2 = feedback_models.GeneralFeedbackThreadModel.get('exp2.thread2')
-        thread3 = feedback_models.GeneralFeedbackThreadModel.get('exp3.thread3')
-        self.assertEqual(thread1.message_count, 2)
-        self.assertEqual(thread2.message_count, 1)
-        self.assertEqual(thread3.message_count, 0)
+        eval_output = [ast.literal_eval(stringified_item)
+                       for stringified_item in stringified_output]
+        output = [(eval_item[0], int(eval_item[1]))
+                  for eval_item in eval_output]
+        return output
+
+    def _check_model_validity(
+            self, user_id, thread_id, original_user_feedback_model):
+        """Checks if the model was migrated correctly."""
+        migrated_user_feedback_model = (
+            feedback_models.GeneralFeedbackThreadUserModel
+            .get(user_id, thread_id))
+        self.assertEqual(migrated_user_feedback_model.user_id, user_id)
+        self.assertEqual(migrated_user_feedback_model.thread_id, thread_id)
+        # Check that the other values didn't change.
+        self.assertEqual(
+            migrated_user_feedback_model.created_on,
+            original_user_feedback_model.created_on
+        )
+        self.assertEqual(
+            migrated_user_feedback_model.last_updated,
+            original_user_feedback_model.last_updated
+        )
+        self.assertEqual(
+            migrated_user_feedback_model.message_ids_read_by_user,
+            original_user_feedback_model.message_ids_read_by_user,
+        )
+
+    def test_successful_migration(self):
+        user_id = 'user'
+        thread_id = 'exploration.exp_id.thread_id'
+        instance_id = '%s.%s' % (user_id, thread_id)
+        user_feedback_model = feedback_models.GeneralFeedbackThreadUserModel(
+            id=instance_id, user_id=None, thread_id=None)
+        user_feedback_model.put()
+
+        output = self._run_one_off_job()
+
+        self.assertEqual(output, [(u'SUCCESS', 1)])
+
+        self._check_model_validity(user_id, thread_id, user_feedback_model)
+
+    def test_successful_migration_unchanged_model(self):
+        user_id = 'user_id'
+        thread_id = 'exploration.exp_id.thread_id'
+        instance_id = '%s.%s' % (user_id, thread_id)
+        user_feedback_model = feedback_models.GeneralFeedbackThreadUserModel(
+            id=instance_id, user_id=user_id, thread_id=thread_id)
+        user_feedback_model.put()
+
+        output = self._run_one_off_job()
+
+        self.assertEqual(output, [(u'SUCCESS', 1)])
+
+        self._check_model_validity(
+            user_id,
+            thread_id,
+            user_feedback_model)
+
+    def test_multiple_feedbacks(self):
+        user_id1 = 'user1'
+        thread_id1 = 'exploration.exp_id.thread_id'
+        instance_id1 = '%s.%s' % (user_id1, thread_id1)
+        user_feedback_model1 = feedback_models.GeneralFeedbackThreadUserModel(
+            id=instance_id1, user_id=None, thread_id=None)
+        user_feedback_model1.put()
+
+        user_id2 = 'user2'
+        thread_id2 = 'exploration.exp_id.thread_id'
+        instance_id2 = '%s.%s' % (user_id2, thread_id2)
+        user_feedback_model2 = feedback_models.GeneralFeedbackThreadUserModel(
+            id=instance_id2,
+            user_id='user2',
+            thread_id='exploration.exp_id.thread_id')
+        user_feedback_model2.put()
+
+        output = self._run_one_off_job()
+
+        self.assertEqual(output, [(u'SUCCESS', 2)])
+
+        self._check_model_validity(user_id1, thread_id1, user_feedback_model1)
+        self._check_model_validity(user_id2, thread_id2, user_feedback_model2)

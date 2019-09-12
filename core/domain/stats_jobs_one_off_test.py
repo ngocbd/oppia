@@ -15,12 +15,17 @@
 # limitations under the License.
 
 """Tests for one off statistics jobs."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 import datetime
 
 from core.domain import config_domain
 from core.domain import exp_domain
+from core.domain import exp_fetchers
 from core.domain import exp_services
+from core.domain import stats_domain
+from core.domain import stats_jobs_continuous
 from core.domain import stats_jobs_one_off
 from core.domain import stats_services
 from core.platform import models
@@ -58,47 +63,27 @@ class OneOffJobTestBase(test_utils.GenericTestBase):
         return self.ONE_OFF_JOB_CLASS.get_output(job_id)
 
 
-class DeleteIllegalPlaythroughsOneOffJobTests(OneOffJobTestBase):
-    ONE_OFF_JOB_CLASS = stats_jobs_one_off.DeleteIllegalPlaythroughsOneOffJob
+class PlaythroughAuditTests(OneOffJobTestBase):
+    ONE_OFF_JOB_CLASS = stats_jobs_one_off.PlaythroughAudit
 
     def setUp(self):
-        super(DeleteIllegalPlaythroughsOneOffJobTests, self).setUp()
-        self.exp = self.save_new_valid_exploration('EXP_ID', 'owner')
+        super(PlaythroughAuditTests, self).setUp()
+        self.exp = self.save_new_valid_exploration('EXP_ID', 'owner_id')
 
-    def create_playthrough_model(self):
-        """Helper method to create a simple playthrough and return its id.
-
-        Returns:
-            str. The ID of the newly created playthrough model.
-        """
-        return stats_models.PlaythroughModel.create(
+    def create_playthrough(self):
+        """Helper method to create and return a simple playthrough model."""
+        playthrough_id = stats_models.PlaythroughModel.create(
             self.exp.id, self.exp.version, issue_type='EarlyQuit',
-            issue_customization_args={}, actions=[])
+            issue_customization_args={
+                'state_name': {'value': 'state_name'},
+                'time_spent_in_exp_in_msecs': {'value': 200},
+            },
+            actions=[])
+        return stats_models.PlaythroughModel.get(playthrough_id)
 
-    def create_old_playthrough_model(self):
-        """Helper method to create a playthrough with a creation date before the
-        start of the GSoC 2018 project.
-
-        Returns:
-            str. The ID of the newly created playthrough model.
-        """
-        playthrough_id = self.create_playthrough_model()
-        playthrough_model = stats_models.PlaythroughModel.get(playthrough_id)
-        # Arbitrary date before GSoC 2018.
-        playthrough_model.created_on = datetime.datetime(2017, 12, 31)
-        playthrough_model.put()
-        return playthrough_id
-
-    def create_playthrough_issues_model(self, playthrough_ids_list):
-        """Helper method to create a playthrough issues model with multiple
-        unresolved issues and return its id.
-
-        Args:
-            playthrough_ids_list: list(list(str)). A list with the set of
-                playthrough ids each individual issue should reference.
-
-        Returns:
-            str. The ID of the new playthrough issue model.
+    def create_exp_issues_with_playthroughs(self, playthrough_ids_list):
+        """Helper method to create and return an ExplorationIssuesModel instance
+        with the given sets of playthrough ids as reference issues.
         """
         return stats_models.ExplorationIssuesModel.create(
             self.exp.id, self.exp.version, unresolved_issues=[
@@ -108,157 +93,23 @@ class DeleteIllegalPlaythroughsOneOffJobTests(OneOffJobTestBase):
                         'state_name': {'value': 'state_name'},
                         'time_spent_in_exp_in_msecs': {'value': 200},
                     },
-                    'playthrough_ids': playthrough_ids,
+                    'playthrough_ids': list(playthrough_ids),
+                    'schema_version': 1,
+                    'is_valid': True,
                 }
                 for playthrough_ids in playthrough_ids_list
             ])
-
-    def test_playthroughs_remain_in_whitelisted_explorations(self):
-        self.set_config_property(
-            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
-            [self.exp.id])
-        playthrough_ids = [
-            self.create_playthrough_model(),
-            self.create_playthrough_model(),
-        ]
-        playthrough_issues_id = (
-            self.create_playthrough_issues_model([playthrough_ids]))
-
-        self.run_one_off_job()
-
-        # Getting these models should not raise.
-        for playthrough_id in playthrough_ids:
-            stats_models.PlaythroughModel.get(playthrough_id)
-        stats_models.ExplorationIssuesModel.get(playthrough_issues_id)
-
-    def test_playthroughs_removed_from_non_whitelisted_explorations(self):
-        self.set_config_property(
-            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
-            [self.exp.id + '-differentiated'])
-        playthrough_ids = [
-            self.create_playthrough_model(),
-            self.create_playthrough_model(),
-        ]
-        playthrough_issues_id = (
-            self.create_playthrough_issues_model([playthrough_ids]))
-
-        self.run_one_off_job()
-
-        for playthrough_id in playthrough_ids:
-            with self.assertRaisesRegexp(Exception, 'not found'):
-                stats_models.PlaythroughModel.get(playthrough_id)
-        with self.assertRaisesRegexp(Exception, 'not found'):
-            stats_models.ExplorationIssuesModel.get(playthrough_issues_id)
-
-    def test_old_playthroughs_removed(self):
-        self.set_config_property(
-            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
-            [self.exp.id])
-        new_playthrough_id = self.create_playthrough_model()
-        old_playthrough_id = self.create_old_playthrough_model()
-        playthrough_issues_id = self.create_playthrough_issues_model([
-            [new_playthrough_id, old_playthrough_id],
-        ])
-
-        self.run_one_off_job()
-
-        with self.assertRaisesRegexp(Exception, 'not found'):
-            stats_models.PlaythroughModel.get(old_playthrough_id)
-        # Should not raise.
-        stats_models.PlaythroughModel.get(new_playthrough_id)
-        # The list of supporting playthroughs should only have the new one.
-        playthrough_issues_model = (
-            stats_models.ExplorationIssuesModel.get(playthrough_issues_id))
-        self.assertEqual(
-            playthrough_issues_model.unresolved_issues[0]['playthrough_ids'],
-            [new_playthrough_id])
-
-    def test_entire_issue_removed_when_all_playthroughs_are_old(self):
-        self.set_config_property(
-            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
-            [self.exp.id])
-        old_playthrough_ids = [
-            self.create_old_playthrough_model(),
-            self.create_old_playthrough_model(),
-        ]
-        playthrough_issues_id = (
-            self.create_playthrough_issues_model([old_playthrough_ids]))
-
-        self.run_one_off_job()
-
-        for old_playthrough_id in old_playthrough_ids:
-            with self.assertRaisesRegexp(Exception, 'not found'):
-                stats_models.PlaythroughModel.get(old_playthrough_id)
-        with self.assertRaisesRegexp(Exception, 'not found'):
-            stats_models.ExplorationIssuesModel.get(playthrough_issues_id)
-
-    def test_issues_with_mixed_playthrough_ages(self):
-        self.set_config_property(
-            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
-            [self.exp.id])
-        old_playthrough_ids = [
-            self.create_old_playthrough_model(),
-            self.create_old_playthrough_model(),
-            self.create_old_playthrough_model(),
-        ]
-        new_playthrough_ids = [
-            self.create_playthrough_model(),
-            self.create_playthrough_model(),
-            self.create_playthrough_model(),
-        ]
-        playthrough_issues_id = self.create_playthrough_issues_model([
-            [old_playthrough_ids[0], old_playthrough_ids[1]],
-            [new_playthrough_ids[0], new_playthrough_ids[1]],
-            [old_playthrough_ids[2], new_playthrough_ids[2]],
-        ])
-
-        self.run_one_off_job()
-
-        # Assert old playthroughs have been deleted.
-        for playthrough_id in old_playthrough_ids:
-            with self.assertRaisesRegexp(Exception, 'not found'):
-                stats_models.PlaythroughModel.get(playthrough_id)
-        for playthrough_id in new_playthrough_ids:
-            # Should not raise.
-            stats_models.PlaythroughModel.get(playthrough_id)
-        # Only two issues remain, because one of them only had old playthroughs.
-        playthrough_issues_model = (
-            stats_models.ExplorationIssuesModel.get(playthrough_issues_id))
-        self.assertEqual(len(playthrough_issues_model.unresolved_issues), 2)
-        # The first element should be the issue where all playthroughs are new.
-        self.assertEqual(
-            playthrough_issues_model.unresolved_issues[0]['playthrough_ids'],
-            [new_playthrough_ids[0], new_playthrough_ids[1]])
-        # The second element should be the issue where one playthrough is old
-        # and the other is new. Only the new playthrough should remain, however.
-        self.assertEqual(
-            playthrough_issues_model.unresolved_issues[1]['playthrough_ids'],
-            [new_playthrough_ids[2]])
-
-
-class PlaythroughAuditTests(OneOffJobTestBase):
-    ONE_OFF_JOB_CLASS = stats_jobs_one_off.PlaythroughAudit
-
-    def setUp(self):
-        super(PlaythroughAuditTests, self).setUp()
-        self.exp = self.save_new_valid_exploration('EXP_ID', 'owner')
-
-    def create_playthrough(self):
-        """Helper method to create and return a simple playthrough model."""
-        playthrough_id = stats_models.PlaythroughModel.create(
-            self.exp.id, self.exp.version, issue_type='EarlyQuit',
-            issue_customization_args={}, actions=[])
-        return stats_models.PlaythroughModel.get(playthrough_id)
 
     def test_empty_output_for_good_playthrough(self):
         self.set_config_property(
             config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
             [self.exp.id])
-        self.create_playthrough()
+        playthrough = self.create_playthrough()
+        self.create_exp_issues_with_playthroughs([[playthrough.id]])
 
         output = self.run_one_off_job()
 
-        self.assertEqual(len(output), 0)
+        self.assertEqual(output, [])
 
     def test_output_for_pre_release_playthrough(self):
         self.set_config_property(
@@ -268,6 +119,7 @@ class PlaythroughAuditTests(OneOffJobTestBase):
         # Set created_on to a date which is definitely before GSoC 2018.
         playthrough.created_on = datetime.datetime(2017, 12, 31)
         playthrough.put()
+        self.create_exp_issues_with_playthroughs([[playthrough.id]])
 
         output = self.run_one_off_job()
 
@@ -278,7 +130,8 @@ class PlaythroughAuditTests(OneOffJobTestBase):
         self.set_config_property(
             config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
             [self.exp.id + 'differentiated'])
-        self.create_playthrough()
+        playthrough = self.create_playthrough()
+        self.create_exp_issues_with_playthroughs([[playthrough.id]])
 
         output = self.run_one_off_job()
 
@@ -292,83 +145,26 @@ class PlaythroughAuditTests(OneOffJobTestBase):
         playthrough = self.create_playthrough()
         playthrough.actions.append({'bad schema key': 'bad schema value'})
         playthrough.put()
+        self.create_exp_issues_with_playthroughs([[playthrough.id]])
 
         output = self.run_one_off_job()
 
         self.assertEqual(len(output), 1)
         self.assertIn('could not be validated', output[0])
 
+    def test_output_for_missing_reference(self):
+        self.set_config_property(
+            config_domain.WHITELISTED_EXPLORATION_IDS_FOR_PLAYTHROUGHS,
+            [self.exp.id])
+        playthrough = self.create_playthrough()
+        self.create_exp_issues_with_playthroughs([
+            [playthrough.id + '-different'],
+        ])
 
-class ExplorationIssuesModelCreatorOneOffJobTests(OneOffJobTestBase):
-    ONE_OFF_JOB_CLASS = (
-        stats_jobs_one_off.ExplorationIssuesModelCreatorOneOffJob)
-    EXP_ID1 = 'EXP_ID1'
-    EXP_ID2 = 'EXP_ID2'
+        output = self.run_one_off_job()
 
-    def setUp(self):
-        super(ExplorationIssuesModelCreatorOneOffJobTests, self).setUp()
-        self.exp1 = self.save_new_valid_exploration(self.EXP_ID1, 'owner')
-        self.exp1.add_states(['New state'])
-        change_list = [
-            exp_domain.ExplorationChange(
-                {'cmd': 'add_state', 'state_name': 'New state'})]
-        exp_services.update_exploration(
-            feconf.SYSTEM_COMMITTER_ID, self.exp1.id, change_list, '')
-        self.exp1 = exp_services.get_exploration_by_id(self.exp1.id)
-        self.exp2 = self.save_new_valid_exploration(self.EXP_ID2, 'owner')
-
-    def test_default_job_execution(self):
-        self.run_one_off_job()
-
-        # ExplorationIssuesModel will be created for versions 1 and 2.
-        exp_issues1_v1 = stats_models.ExplorationIssuesModel.get_model(
-            self.EXP_ID1, self.exp1.version - 1)
-        self.assertEqual(exp_issues1_v1.exp_id, self.EXP_ID1)
-        self.assertEqual(exp_issues1_v1.exp_version, self.exp1.version - 1)
-        self.assertEqual(exp_issues1_v1.unresolved_issues, [])
-
-        exp_issues1_v2 = stats_models.ExplorationIssuesModel.get_model(
-            self.EXP_ID1, self.exp1.version)
-        self.assertEqual(exp_issues1_v2.exp_id, self.EXP_ID1)
-        self.assertEqual(exp_issues1_v2.exp_version, self.exp1.version)
-        self.assertEqual(exp_issues1_v2.unresolved_issues, [])
-
-        # ExplorationIssuesModel will be created only for version 1.
-        exp_issues2 = stats_models.ExplorationIssuesModel.get_model(
-            self.EXP_ID2, self.exp2.version)
-        self.assertEqual(exp_issues2.exp_id, self.EXP_ID2)
-        self.assertEqual(exp_issues2.exp_version, self.exp2.version)
-        self.assertEqual(exp_issues2.unresolved_issues, [])
-
-    def test_with_existing_exp_issues_instance(self):
-        stats_models.ExplorationIssuesModel.create(
-            self.EXP_ID1, self.exp1.version, unresolved_issues=[{
-                'issue_type': 'EarlyQuit',
-                'issue_customization_args': {
-                    'state_name': {
-                        'value': 'state_name1',
-                    },
-                    'time_spent_in_exp_in_msecs': {
-                        'value': 200,
-                    },
-                },
-                'playthrough_ids': ['playthrough_id1'],
-            }]
-        )
-
-        self.run_one_off_job()
-
-        exp_issues1 = stats_models.ExplorationIssuesModel.get_model(
-            self.EXP_ID1, self.exp1.version)
-        self.assertEqual(exp_issues1.exp_id, self.EXP_ID1)
-        self.assertEqual(exp_issues1.exp_version, self.exp1.version)
-        self.assertEqual(exp_issues1.unresolved_issues, [])
-
-        exp_issues2 = stats_models.ExplorationIssuesModel.get_model(
-            self.EXP_ID2, self.exp2.version)
-        self.assertEqual(exp_issues2.exp_id, self.EXP_ID2)
-        self.assertEqual(exp_issues2.exp_version, self.exp2.version)
-        self.assertEqual(exp_issues2.unresolved_issues, [])
+        self.assertEqual(len(output), 1)
+        self.assertIn('not found as a reference', output[0])
 
 
 class RegenerateMissingStatsModelsOneOffJobTests(OneOffJobTestBase):
@@ -407,7 +203,7 @@ class RegenerateMissingStatsModelsOneOffJobTests(OneOffJobTestBase):
         # v2 version does not have ExplorationStatsModel.
         exp_services.update_exploration(
             feconf.SYSTEM_COMMITTER_ID, self.exp1.id, change_list, '')
-        self.exp1 = exp_services.get_exploration_by_id(self.exp1.id)
+        self.exp1 = exp_fetchers.get_exploration_by_id(self.exp1.id)
 
     def test_stats_models_regeneration_works(self):
         """Test that stats models are regenerated with correct v1 stats
@@ -430,6 +226,47 @@ class RegenerateMissingStatsModelsOneOffJobTests(OneOffJobTestBase):
         self.assertEqual(state_stats.total_hit_count_v1, 3)
         self.assertEqual(state_stats.first_hit_count_v1, 3)
         self.assertEqual(state_stats.num_completions_v1, 3)
+
+    def test_output_for_deleted_exploration(self):
+        job_id = self.ONE_OFF_JOB_CLASS.create_new()
+        self.ONE_OFF_JOB_CLASS.enqueue(job_id)
+        self.assertEqual(self.count_one_off_jobs_in_queue(), 1)
+
+        exp_services.delete_exploration('owner', self.EXP_ID)
+        self.process_and_flush_pending_tasks()
+        self.assertEqual(self.count_one_off_jobs_in_queue(), 0)
+
+        output = self.ONE_OFF_JOB_CLASS.get_output(job_id)
+        self.assertEqual(output, [])
+
+    def test_stats_models_regeneration_with_no_stats_model(self):
+        change_list = [exp_domain.ExplorationChange({
+            'cmd': exp_domain.CMD_RENAME_STATE,
+            'old_state_name': 'New state',
+            'new_state_name': 'Another state'
+        })]
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.exp1.id, change_list, '')
+
+        model_id = '%s.3' % self.EXP_ID
+        model1 = stats_models.ExplorationStatsModel.get(model_id)
+        model1.delete()
+
+        output = self.run_one_off_job()
+        self.assertEqual(
+            output,
+            ['[u\'ExplorationStatsModel for missing versions regenerated: \', '
+             '[u\'EXP_ID1 v3\']]'])
+
+        model_id = '%s.2' % self.EXP_ID
+        model1 = stats_models.ExplorationStatsModel.get(model_id)
+        model1.delete()
+
+        output = self.run_one_off_job()
+        self.assertEqual(
+            output,
+            ['[u\'ExplorationStatsModel for missing versions regenerated: \', '
+             '[u\'EXP_ID1 v2\']]'])
 
 
 class RecomputeStateCompleteStatisticsTests(OneOffJobTestBase):
@@ -550,6 +387,47 @@ class RecomputeStateCompleteStatisticsTests(OneOffJobTestBase):
         # counts the events for the state in previous versions
         # with the old name.
         self.assertEqual(state_stats['num_completions_v2'], 4)
+
+    def test_job_for_addition_and_deletion_of_state_names(self):
+        change_list = [
+            exp_domain.ExplorationChange({
+                'cmd': exp_domain.CMD_ADD_STATE,
+                'state_name': 'State A',
+            })
+        ]
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, change_list, '')
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(job_output, [])
+
+        model_id = (
+            stats_models.ExplorationStatsModel.get_entity_id(self.EXP_ID, 4))
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        state_stats = model.state_stats_mapping.get('State A')
+
+        expected_state_stats_dict = stats_domain.StateStats.create_default(
+            ).to_dict()
+        self.assertEqual(state_stats, expected_state_stats_dict)
+
+        change_list = [
+            exp_domain.ExplorationChange({
+                'cmd': exp_domain.CMD_DELETE_STATE,
+                'state_name': 'State A',
+            })
+        ]
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, change_list, '')
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(job_output, [])
+
+        model_id = (
+            stats_models.ExplorationStatsModel.get_entity_id(self.EXP_ID, 5))
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        state_stats = model.state_stats_mapping.get('State A')
+
+        self.assertIsNone(state_stats)
 
 
 class RecomputeAnswerSubmittedStatisticsTests(OneOffJobTestBase):
@@ -1020,6 +898,58 @@ class RecomputeActualStartStatisticsTests(OneOffJobTestBase):
         model = stats_models.ExplorationStatsModel.get(model_id)
         self.assertEqual(model.num_actual_starts_v2, 3)
 
+    def test_job_with_no_exploration_version(self):
+        model1 = stats_models.ExplorationActualStartEventLogEntryModel.get(
+            'id1')
+        model2 = stats_models.ExplorationActualStartEventLogEntryModel.get(
+            'id2')
+        model3 = stats_models.ExplorationActualStartEventLogEntryModel.get(
+            'id3')
+        model4 = stats_models.ExplorationActualStartEventLogEntryModel.get(
+            'id4')
+        stats_models.ExplorationActualStartEventLogEntryModel.delete_multi(
+            [model1, model2, model3, model4])
+        stats_models.ExplorationActualStartEventLogEntryModel(
+            id='id',
+            exp_id=self.EXP_ID,
+            exp_version=None,
+            state_name=self.STATE_NAME,
+            session_id='session_id_4',
+            event_schema_version=2).put()
+        created_on = stats_models.ExplorationActualStartEventLogEntryModel.get(
+            'id').created_on
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'None version for EXP_ID actual_start state_1 id %s\']'
+             % created_on])
+
+    def test_job_with_invalid_exploration_id(self):
+        stats_models.ExplorationActualStartEventLogEntryModel(
+            id='id',
+            exp_id='invalid_exp_id',
+            exp_version=self.EXP_VERSION,
+            state_name=self.STATE_NAME,
+            session_id='session_id_4',
+            event_schema_version=2).put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Exploration with exploration_id invalid_exp_id not found\']'])
+
+    def test_job_with_non_existing_datastore_stats(self):
+        model1 = stats_models.ExplorationStatsModel.get('%s.2' % self.EXP_ID)
+        model2 = stats_models.ExplorationStatsModel.get('%s.3' % self.EXP_ID)
+        stats_models.ExplorationStatsModel.delete_multi([model1, model2])
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'ERROR in retrieving datastore stats. They do not exist for: '
+             'exp_id: EXP_ID, exp_version: 2\']'])
+
 
 class RecomputeCompleteEventStatisticsTests(OneOffJobTestBase):
     ONE_OFF_JOB_CLASS = stats_jobs_one_off.RecomputeStatisticsOneOffJob
@@ -1105,3 +1035,457 @@ class RecomputeCompleteEventStatisticsTests(OneOffJobTestBase):
             stats_models.ExplorationStatsModel.get_entity_id(self.EXP_ID, 2))
         model = stats_models.ExplorationStatsModel.get(model_id)
         self.assertEqual(model.num_completions_v2, 3)
+
+
+class StatisticsAuditTests(OneOffJobTestBase):
+
+    ONE_OFF_JOB_CLASS = stats_jobs_one_off.StatisticsAudit
+    EXP_ID = 'EXP_ID'
+    EXP_VERSION = 1
+    STATE_NAME = 'state_1'
+
+    def setUp(self):
+        super(StatisticsAuditTests, self).setUp()
+
+        state_count = {
+            'state_name': {
+                'first_entry_count': 1,
+                'total_entry_count': 1,
+                'no_answer_count': 1
+            }
+        }
+        stats_models.ExplorationAnnotationsModel.create(
+            'exp_id1', '1', 0, 0, state_count)
+        stats_models.StateCounterModel.get_or_create('exp_id1', 'state_name')
+
+    def test_statistics_audit_with_negative_start_count(self):
+        model1 = stats_models.ExplorationAnnotationsModel.get('exp_id1:1')
+        model1.num_starts = -2
+        model1.put()
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Negative start count: exp_id:exp_id1 version:1 starts:-2\']',
+             '[u\'Completions > starts: exp_id:exp_id1 version:1 0>-2\']',
+             '[u\'Non-all != all for starts: exp_id:exp_id1 sum: -2 all: 0\']'])
+
+    def test_statistics_audit_with_negative_completion_count(self):
+        model1 = stats_models.ExplorationAnnotationsModel.get('exp_id1:1')
+        model1.num_completions = -2
+        model1.put()
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Negative completion count: exp_id:exp_id1 version:1 '
+             'completions:-2\']',
+             '[u\'Non-all != all for completions: exp_id:exp_id1 sum: -2 '
+             'all: 0\']'])
+
+    def test_statistics_audit_with_version_all(self):
+        model1 = stats_models.ExplorationAnnotationsModel.get('exp_id1:1')
+        model1.version = stats_jobs_continuous.VERSION_ALL
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'state hit count not same exp_id:exp_id1 state:state_name, '
+             'all:1 sum: null\']'])
+
+    def test_statistics_audit_with_negative_first_entry_count(self):
+        model1 = stats_models.StateCounterModel.get_or_create(
+            'exp_id1', 'state_name')
+        model1.first_entry_count = -1
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u"Less than 0: Key('
+             '\'StateCounterModel\', \'exp_id1.state_name\') -1"]'])
+
+
+class StatisticsAuditVTwoTests(OneOffJobTestBase):
+
+    ONE_OFF_JOB_CLASS = stats_jobs_one_off.StatisticsAuditV2
+    EXP_ID = 'EXP_ID'
+    EXP_VERSION = 1
+    STATE_NAME = 'state_1'
+
+    def setUp(self):
+        super(StatisticsAuditVTwoTests, self).setUp()
+
+        state_stats_dict = {
+            'total_answers_count_v1': 3,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 3,
+            'useful_feedback_count_v2': 1,
+            'total_hit_count_v1': 3,
+            'total_hit_count_v2': 1,
+            'first_hit_count_v1': 3,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 3,
+            'num_completions_v2': 1,
+        }
+        stats_models.ExplorationStatsModel.create(
+            self.EXP_ID, self.EXP_VERSION, num_starts_v1=2, num_starts_v2=2,
+            num_actual_starts_v1=1, num_actual_starts_v2=1,
+            num_completions_v1=0, num_completions_v2=0,
+            state_stats_mapping={self.STATE_NAME: state_stats_dict})
+
+    def test_statistics_audit_v2_with_invalid_completions_count(self):
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.num_completions_v2 = 3
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Completions > starts: exp_id:EXP_ID version:1 3 > 2\']',
+             '[u\'Completions > actual starts: exp_id:EXP_ID version:1 '
+             '3 > 1\']'])
+
+    def test_statistics_audit_v2_with_invalid_actual_starts_count(self):
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.num_actual_starts_v2 = 3
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Actual starts > starts: exp_id:EXP_ID version:1 3 > 2\']'])
+
+    def test_statistics_audit_v2_with_invalid_useful_feedback_count(self):
+        state_stats_dict = {
+            'total_answers_count_v1': 3,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 3,
+            'useful_feedback_count_v2': 10,
+            'total_hit_count_v1': 3,
+            'total_hit_count_v2': 1,
+            'first_hit_count_v1': 3,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 3,
+            'num_completions_v2': 1,
+        }
+
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.state_stats_mapping = {self.STATE_NAME: state_stats_dict}
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Total answers < Answers with useful feedback: exp_id:EXP_ID '
+             'version:1 state:state_1 9 > 10\']'])
+
+    def test_statistics_audit_v2_with_negative_total_hit_count(self):
+        state_stats_dict = {
+            'total_answers_count_v1': 3,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 3,
+            'useful_feedback_count_v2': 1,
+            'total_hit_count_v1': 3,
+            'total_hit_count_v2': -1,
+            'first_hit_count_v1': 3,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 3,
+            'num_completions_v2': 1,
+        }
+
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.state_stats_mapping = {self.STATE_NAME: state_stats_dict}
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Solution count > Total state hits: exp_id:EXP_ID version:1 '
+             'state:state_1 1 > -1\']',
+             '[u\'Total state hits < First state hits: exp_id:EXP_ID version:1 '
+             'state:state_1 -1 > 1\']',
+             '[u\'Total state hits < Total state completions: exp_id:EXP_ID '
+             'version:1 state:state_1 -1 > 1\']',
+             'Negative count: exp_id:EXP_ID version:1 state:state_1 '
+             'total_hit_count_v2:-1'])
+
+
+class StatisticsAuditVOneTests(OneOffJobTestBase):
+
+    ONE_OFF_JOB_CLASS = stats_jobs_one_off.StatisticsAuditV1
+    EXP_ID = 'EXP_ID'
+    EXP_VERSION = 1
+    STATE_NAME = 'state_1'
+
+    def setUp(self):
+        super(StatisticsAuditVOneTests, self).setUp()
+
+        state_stats_dict = {
+            'total_answers_count_v1': 9,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 1,
+            'useful_feedback_count_v2': 1,
+            'total_hit_count_v1': 1,
+            'total_hit_count_v2': 1,
+            'first_hit_count_v1': 1,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 1,
+            'num_completions_v2': 1,
+        }
+        stats_models.ExplorationStatsModel.create(
+            self.EXP_ID, self.EXP_VERSION, num_starts_v1=2, num_starts_v2=2,
+            num_actual_starts_v1=1, num_actual_starts_v2=1,
+            num_completions_v1=0, num_completions_v2=0,
+            state_stats_mapping={self.STATE_NAME: state_stats_dict})
+
+    def test_statistics_audit_v1_with_invalid_completions_count(self):
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.num_completions_v1 = 3
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Completions > starts: exp_id:EXP_ID version:1 3 > 2\']',
+             '[u\'Completions > actual starts: exp_id:EXP_ID version:1 '
+             '3 > 1\']'])
+
+    def test_statistics_audit_v1_with_invalid_actual_starts_count(self):
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.num_actual_starts_v1 = 3
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Actual starts > starts: exp_id:EXP_ID version:1 3 > 2\']'])
+
+    def test_statistics_audit_v1_with_invalid_useful_feedback_count(self):
+        state_stats_dict = {
+            'total_answers_count_v1': 9,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 10,
+            'useful_feedback_count_v2': 1,
+            'total_hit_count_v1': 1,
+            'total_hit_count_v2': 1,
+            'first_hit_count_v1': 1,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 1,
+            'num_completions_v2': 1,
+        }
+
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.state_stats_mapping = {self.STATE_NAME: state_stats_dict}
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Total answers < Answers with useful feedback: exp_id:EXP_ID '
+             'version:1 state:state_1 9 > 10\']'])
+
+    def test_statistics_audit_v1_with_negative_total_hit_count(self):
+        state_stats_dict = {
+            'total_answers_count_v1': 9,
+            'total_answers_count_v2': 9,
+            'useful_feedback_count_v1': 1,
+            'useful_feedback_count_v2': 1,
+            'total_hit_count_v1': -1,
+            'total_hit_count_v2': 1,
+            'first_hit_count_v1': 1,
+            'first_hit_count_v2': 1,
+            'num_times_solution_viewed_v2': 1,
+            'num_completions_v1': 1,
+            'num_completions_v2': 1,
+        }
+
+        model1 = stats_models.ExplorationStatsModel.get_model(
+            self.EXP_ID, self.EXP_VERSION)
+        model1.state_stats_mapping = {self.STATE_NAME: state_stats_dict}
+        model1.put()
+
+        job_output = self.run_one_off_job()
+        self.assertEqual(
+            job_output,
+            ['[u\'Total state hits < First state hits: exp_id:EXP_ID version:1 '
+             'state:state_1 -1 > 1\']',
+             '[u\'Total state hits < Total state completions: exp_id:EXP_ID '
+             'version:1 state:state_1 -1 > 1\']',
+             'Negative count: exp_id:EXP_ID version:1 state:state_1 '
+             'total_hit_count_v1:-1'])
+
+
+class RecomputeStatisticsValidationCopyOneOffJobTests(OneOffJobTestBase):
+
+    ONE_OFF_JOB_CLASS = (
+        stats_jobs_one_off.RecomputeStatisticsValidationCopyOneOffJob)
+    EXP_ID = 'EXP_ID'
+    EXP_VERSION = 1
+    STATE_NAME = 'state_1'
+
+    def setUp(self):
+        super(RecomputeStatisticsValidationCopyOneOffJobTests, self).setUp()
+        self.exp = self.save_new_valid_exploration(self.EXP_ID, 'owner_id')
+
+        stats_models.StateCompleteEventLogEntryModel(
+            id='id0',
+            exp_id=self.EXP_ID,
+            exp_version=1,
+            state_name=self.exp.init_state_name,
+            session_id='session_id_1',
+            time_spent_in_state_secs=1.0,
+            event_schema_version=2).put()
+        stats_models.StateCompleteEventLogEntryModel(
+            id='id1',
+            exp_id=self.EXP_ID,
+            exp_version=None,
+            state_name=self.exp.init_state_name,
+            session_id='session_id_2',
+            time_spent_in_state_secs=1.0,
+            event_schema_version=2).put()
+        stats_models.StateCompleteEventLogEntryModel(
+            id='id2',
+            exp_id=self.EXP_ID,
+            exp_version=1,
+            state_name=self.exp.init_state_name,
+            session_id='session_id_3',
+            time_spent_in_state_secs=1.0,
+            event_schema_version=1).put()
+
+        stats_models.StartExplorationEventLogEntryModel.create(
+            self.EXP_ID, 1, self.exp.init_state_name, 'session_id1', {},
+            feconf.PLAY_TYPE_NORMAL)
+
+        state_stats_dict = {
+            'total_answers_count_v1': 3,
+            'total_answers_count_v2': 0,
+            'useful_feedback_count_v1': 3,
+            'useful_feedback_count_v2': 0,
+            'total_hit_count_v1': 3,
+            'total_hit_count_v2': 0,
+            'first_hit_count_v1': 3,
+            'first_hit_count_v2': 0,
+            'num_times_solution_viewed_v2': 0,
+            'num_completions_v1': 3,
+            'num_completions_v2': 9,
+        }
+        stats_models.ExplorationStatsModel.create(
+            self.EXP_ID, exp_version=1, num_starts_v1=0, num_starts_v2=0,
+            num_actual_starts_v1=0, num_actual_starts_v2=0,
+            num_completions_v1=0, num_completions_v2=0,
+            state_stats_mapping={self.exp.init_state_name: state_stats_dict})
+
+    def test_recompute_statistics_validation_copy_one_off_job(self):
+        self.run_one_off_job()
+
+        model_id = (
+            stats_models.ExplorationStatsModel.get_entity_id(self.EXP_ID, 1))
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        state_stats = model.state_stats_mapping[self.exp.init_state_name]
+
+        self.assertEqual(state_stats['num_completions_v2'], 9)
+
+
+class TestRegenerateMissingStatsModels(OneOffJobTestBase):
+    """Tests the regeneration of missing stats models."""
+    ONE_OFF_JOB_CLASS = stats_jobs_one_off.RegenerateMissingStatsModels
+
+    def setUp(self):
+        super(TestRegenerateMissingStatsModels, self).setUp()
+        self.EXP_ID = 'EXP_ID'
+        self.exp = self.save_new_valid_exploration(self.EXP_ID, 'owner_id')
+        self.state_name = self.exp.init_state_name
+
+        change_list = []
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, change_list, '')
+        change_list = [
+            exp_domain.ExplorationChange({
+                'cmd': exp_domain.CMD_RENAME_STATE,
+                'old_state_name': self.state_name,
+                'new_state_name': 'b',
+            })
+        ]
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, change_list, '')
+
+        exp_services.revert_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, 3, 2)
+
+        change_list = [
+            exp_domain.ExplorationChange({
+                'cmd': exp_domain.CMD_RENAME_STATE,
+                'old_state_name': self.state_name,
+                'new_state_name': 'b',
+            })
+        ]
+        exp_services.update_exploration(
+            feconf.SYSTEM_COMMITTER_ID, self.EXP_ID, change_list, '')
+
+    def test_job_successfully_regenerates_deleted_model(self):
+        self.exp = exp_fetchers.get_exploration_by_id(self.EXP_ID)
+        self.assertEqual(self.exp.version, 5)
+
+        model_id = stats_models.ExplorationStatsModel.get_entity_id(
+            self.EXP_ID, 4)
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        model.delete()
+
+        output = self.run_one_off_job()
+        model_id = stats_models.ExplorationStatsModel.get_entity_id(
+            self.EXP_ID, 4)
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        self.assertEqual(output, [u'[u\'Success\', 1]'])
+
+    def test_job_yields_correct_message_when_missing_model_at_version_1(self):
+        self.exp = exp_fetchers.get_exploration_by_id(self.EXP_ID)
+        self.assertEqual(self.exp.version, 5)
+
+        model_id = stats_models.ExplorationStatsModel.get_entity_id(
+            self.EXP_ID, 1)
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        model.delete()
+        model_id = stats_models.ExplorationStatsModel.get_entity_id(
+            self.EXP_ID, 2)
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        model.delete()
+
+        output = self.run_one_off_job()
+        self.assertEqual(
+            output, [u'[u\'Missing model at version 1\', [u\''
+                     + self.EXP_ID + '\']]'])
+
+    def test_job_yields_no_change_when_no_regeneration_is_needed(self):
+        self.exp = exp_fetchers.get_exploration_by_id(self.EXP_ID)
+        self.assertEqual(self.exp.version, 5)
+
+        output = self.run_one_off_job()
+        self.assertEqual(output, [u'[u\'No change\', 1]'])
+
+    def test_job_yields_correct_message_when_missing_model_at_non_revert_commit(
+            self):
+        self.exp = exp_fetchers.get_exploration_by_id(self.EXP_ID)
+        self.assertEqual(self.exp.version, 5)
+
+        model_id = stats_models.ExplorationStatsModel.get_entity_id(
+            self.EXP_ID, 2)
+        model = stats_models.ExplorationStatsModel.get(model_id)
+        model.delete()
+
+        output = self.run_one_off_job()
+        self.assertEqual(
+            output,
+            [u'[u\'Missing model without revert commit\', [u\''
+             + self.EXP_ID + '\']]'])

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 """Tests for fetching the features Oppia provides to its users."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 from core.domain import config_domain
 from core.domain import rights_manager
@@ -51,7 +53,7 @@ class ExplorationPlaythroughRecordingFeatureTest(ExplorationFeaturesTestBase):
 
         json_response = self.get_json(exploration_features_url(self.EXP_ID))
 
-        self.assertTrue(json_response['is_playthrough_recording_enabled'])
+        self.assertTrue(json_response['is_exploration_whitelisted'])
 
     def test_can_not_record_playthroughs_with_empty_whitelist(self):
         self.set_config_property(
@@ -60,7 +62,7 @@ class ExplorationPlaythroughRecordingFeatureTest(ExplorationFeaturesTestBase):
 
         json_response = self.get_json(exploration_features_url(self.EXP_ID))
 
-        self.assertFalse(json_response['is_playthrough_recording_enabled'])
+        self.assertFalse(json_response['is_exploration_whitelisted'])
 
     def test_can_not_record_playthroughs_for_exploration_not_in_whitelist(self):
         self.set_config_property(
@@ -69,7 +71,7 @@ class ExplorationPlaythroughRecordingFeatureTest(ExplorationFeaturesTestBase):
 
         json_response = self.get_json(exploration_features_url(self.EXP_ID))
 
-        self.assertFalse(json_response['is_playthrough_recording_enabled'])
+        self.assertFalse(json_response['is_exploration_whitelisted'])
 
 
 class ExplorationImprovementsTabFeatureTest(ExplorationFeaturesTestBase):

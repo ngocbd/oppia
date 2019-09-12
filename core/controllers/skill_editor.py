@@ -13,22 +13,17 @@
 # limitations under the License.
 
 """Controllers for the skill editor."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
-from constants import constants
+from core.controllers import acl_decorators
 from core.controllers import base
-from core.domain import acl_decorators
-from core.domain import dependency_registry
-from core.domain import interaction_registry
-from core.domain import obj_services
-from core.domain import question_services
 from core.domain import role_services
 from core.domain import skill_domain
 from core.domain import skill_services
 from core.domain import user_services
 import feconf
 import utils
-
-import jinja2
 
 
 def _require_valid_version(version_from_payload, skill_version):
@@ -58,15 +53,9 @@ def _require_valid_version(version_from_payload, skill_version):
 class SkillEditorPage(base.BaseHandler):
     """The editor page for a single skill."""
 
-    EDITOR_PAGE_DEPENDENCY_IDS = ['codemirror']
-
     @acl_decorators.can_edit_skill
     def get(self, skill_id):
         """Handles GET requests."""
-
-        if not constants.ENABLE_NEW_STRUCTURE_EDITORS:
-            raise self.PageNotFoundException
-
         skill_domain.Skill.require_valid_skill_id(skill_id)
 
         skill = skill_services.get_skill_by_id(skill_id, strict=False)
@@ -75,33 +64,7 @@ class SkillEditorPage(base.BaseHandler):
             raise self.PageNotFoundException(
                 Exception('The skill with the given id doesn\'t exist.'))
 
-        interaction_ids = feconf.ALLOWED_QUESTION_INTERACTION_IDS
-
-        interaction_dependency_ids = (
-            interaction_registry.Registry.get_deduplicated_dependency_ids(
-                interaction_ids))
-        dependencies_html, additional_angular_modules = (
-            dependency_registry.Registry.get_deps_html_and_angular_modules(
-                interaction_dependency_ids + self.EDITOR_PAGE_DEPENDENCY_IDS))
-
-        interaction_templates = (
-            interaction_registry.Registry.get_interaction_html(
-                interaction_ids))
-
-        self.values.update({
-            'skill_id': skill.id,
-            'DEFAULT_OBJECT_VALUES': obj_services.get_default_object_values(),
-            'additional_angular_modules': additional_angular_modules,
-            'INTERACTION_SPECS': interaction_registry.Registry.get_all_specs(),
-            'interaction_templates': jinja2.utils.Markup(
-                interaction_templates),
-            'dependencies_html': jinja2.utils.Markup(dependencies_html),
-            'ALLOWED_INTERACTION_CATEGORIES': (
-                feconf.ALLOWED_QUESTION_INTERACTION_CATEGORIES)
-        })
-
-        self.render_template(
-            'pages/skill_editor/skill_editor.html', redirect_url_on_logout='/')
+        self.render_template('skill-editor-page.mainpage.html')
 
 
 def check_can_edit_skill_description(user):
@@ -146,35 +109,6 @@ class SkillRightsHandler(base.BaseHandler):
         self.render_json(self.values)
 
 
-class SkillEditorQuestionHandler(base.BaseHandler):
-    """Manages the creation of a question and receiving of all question
-    summaries for display in skill editor page.
-    """
-    GET_HANDLER_ERROR_RETURN_TYPE = feconf.HANDLER_TYPE_JSON
-
-    @acl_decorators.can_edit_skill
-    def get(self, skill_id):
-        """Handles GET requests."""
-        if not constants.ENABLE_NEW_STRUCTURE_EDITORS:
-            raise self.PageNotFoundException
-        skill_domain.Skill.require_valid_skill_id(skill_id)
-
-        start_cursor = self.request.get('cursor')
-
-        question_summaries, next_start_cursor = (
-            question_services.get_question_summaries_linked_to_skills(
-                constants.NUM_QUESTIONS_PER_PAGE, [skill_id], start_cursor)
-        )
-        question_summary_dicts = [
-            summary.to_dict() for summary in question_summaries]
-
-        self.values.update({
-            'question_summary_dicts': question_summary_dicts,
-            'next_start_cursor': next_start_cursor
-        })
-        self.render_json(self.values)
-
-
 class EditableSkillDataHandler(base.BaseHandler):
     """A data handler for skills which supports writing."""
 
@@ -183,9 +117,6 @@ class EditableSkillDataHandler(base.BaseHandler):
     @acl_decorators.can_edit_skill
     def get(self, skill_id):
         """Populates the data on the individual skill page."""
-        if not constants.ENABLE_NEW_STRUCTURE_EDITORS:
-            raise self.PageNotFoundException
-
         skill_domain.Skill.require_valid_skill_id(skill_id)
         skill = skill_services.get_skill_by_id(skill_id, strict=False)
         if skill is None:
@@ -201,9 +132,6 @@ class EditableSkillDataHandler(base.BaseHandler):
     @acl_decorators.can_edit_skill
     def put(self, skill_id):
         """Updates properties of the given skill."""
-        if not constants.ENABLE_NEW_STRUCTURE_EDITORS:
-            raise self.PageNotFoundException
-
         skill_domain.Skill.require_valid_skill_id(skill_id)
         skill = skill_services.get_skill_by_id(skill_id, strict=False)
         if skill is None:
@@ -236,9 +164,6 @@ class EditableSkillDataHandler(base.BaseHandler):
     @acl_decorators.can_delete_skill
     def delete(self, skill_id):
         """Handles Delete requests."""
-        if not constants.ENABLE_NEW_STRUCTURE_EDITORS:
-            raise self.PageNotFoundException
-
         skill_domain.Skill.require_valid_skill_id(skill_id)
         if skill_services.skill_has_associated_questions(skill_id):
             raise Exception(
@@ -246,6 +171,35 @@ class EditableSkillDataHandler(base.BaseHandler):
                 'first.')
 
         skill_services.delete_skill(self.user_id, skill_id)
+
+        self.render_json(self.values)
+
+
+class SkillDataHandler(base.BaseHandler):
+    """A handler for accessing skills data."""
+
+    GET_HANDLER_ERROR_RETURN_TYPE = feconf.HANDLER_TYPE_JSON
+
+    @acl_decorators.open_access
+    def get(self, comma_separated_skill_ids):
+        """Populates the data on skill pages of the skill ids."""
+
+        skill_ids = comma_separated_skill_ids.split(',')
+
+        try:
+            for skill_id in skill_ids:
+                skill_domain.Skill.require_valid_skill_id(skill_id)
+        except Exception as e:
+            raise self.PageNotFoundException('Invalid skill id.')
+        try:
+            skills = skill_services.get_multi_skills(skill_ids)
+        except Exception as e:
+            raise self.PageNotFoundException(e)
+
+        skill_dicts = [skill.to_dict() for skill in skills]
+        self.values.update({
+            'skills': skill_dicts
+        })
 
         self.render_json(self.values)
 

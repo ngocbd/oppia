@@ -15,6 +15,8 @@
 # limitations under the License.
 
 """Tests interface for storage model switching."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 from core.platform import models
 from core.tests import test_utils
@@ -273,3 +275,8 @@ class RegistryUnitTest(test_utils.GenericTestBase):
         self.assertEqual(
             self.registry_instance.import_search_services(),
             gae_search_services)
+
+    def test_import_models_not_implemented_has_not_implemented_error(self):
+        """Tests NotImplementedError of Platform."""
+        with self.assertRaises(NotImplementedError):
+            models.Platform().import_models()

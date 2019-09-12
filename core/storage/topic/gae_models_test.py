@@ -15,6 +15,8 @@
 # limitations under the License.
 
 """Tests for Topic model."""
+from __future__ import absolute_import  # pylint: disable=import-only-modules
+from __future__ import unicode_literals  # pylint: disable=import-only-modules
 
 from constants import constants
 from core.domain import topic_domain
@@ -23,7 +25,8 @@ from core.platform import models
 from core.tests import test_utils
 import feconf
 
-(topic_models,) = models.Registry.import_models([models.NAMES.topic])
+(base_models, topic_models) = models.Registry.import_models(
+    [models.NAMES.base_model, models.NAMES.topic])
 
 
 class TopicModelUnitTests(test_utils.GenericTestBase):
@@ -32,15 +35,27 @@ class TopicModelUnitTests(test_utils.GenericTestBase):
     TOPIC_CANONICAL_NAME = 'topic_name'
     TOPIC_ID = 'topic_id'
 
+    def test_get_deletion_policy(self):
+        self.assertEqual(
+            topic_models.TopicModel.get_deletion_policy(),
+            base_models.DELETION_POLICY.KEEP_IF_PUBLIC)
+
     def test_that_subsidiary_models_are_created_when_new_model_is_saved(self):
         """Tests the _trusted_commit() method."""
 
+        topic_rights = topic_models.TopicRightsModel(
+            id=self.TOPIC_ID,
+            manager_ids=[],
+            topic_is_published=True
+        )
         # Topic is created but not committed/saved.
         topic = topic_models.TopicModel(
             id=self.TOPIC_ID,
             name=self.TOPIC_NAME,
             canonical_name=self.TOPIC_CANONICAL_NAME,
             subtopic_schema_version=feconf.CURRENT_SUBTOPIC_SCHEMA_VERSION,
+            story_reference_schema_version=(
+                feconf.CURRENT_STORY_REFERENCE_SCHEMA_VERSION),
             next_subtopic_id=1,
             language_code='en'
         )
@@ -48,6 +63,11 @@ class TopicModelUnitTests(test_utils.GenericTestBase):
         self.assertIsNone(topic_models.TopicModel.get_by_name(self.TOPIC_NAME))
         # We call commit() expecting that _trusted_commit works fine
         # and saves topic to datastore.
+        topic_rights.commit(
+            committer_id=feconf.SYSTEM_COMMITTER_ID,
+            commit_message='Created new topic rights',
+            commit_cmds=[{'cmd': topic_domain.CMD_CREATE_NEW}]
+        )
         topic.commit(
             committer_id=feconf.SYSTEM_COMMITTER_ID,
             commit_message='Created new topic',
@@ -100,9 +120,23 @@ class TopicCommitLogEntryModelUnitTest(test_utils.GenericTestBase):
         )
 
 
+class TopicSummaryModelUnitTests(test_utils.GenericTestBase):
+    """Tests the TopicSummaryModel class."""
+
+    def test_get_deletion_policy(self):
+        self.assertEqual(
+            topic_models.TopicSummaryModel.get_deletion_policy(),
+            base_models.DELETION_POLICY.KEEP_IF_PUBLIC)
+
+
 class SubtopicPageModelUnitTest(test_utils.GenericTestBase):
-    """Tests the SubtopicPageModelUnitTest class."""
+    """Tests the SubtopicPageModel class."""
     SUBTOPIC_PAGE_ID = 'subtopic_page_id'
+
+    def test_get_deletion_policy(self):
+        self.assertEqual(
+            topic_models.SubtopicPageModel.get_deletion_policy(),
+            base_models.DELETION_POLICY.KEEP_IF_PUBLIC)
 
     def test_that_subsidiary_models_are_created_when_new_model_is_saved(self):
         """Tests the _trusted_commit() method."""
@@ -112,6 +146,8 @@ class SubtopicPageModelUnitTest(test_utils.GenericTestBase):
             id=self.SUBTOPIC_PAGE_ID,
             topic_id='topic_id',
             page_contents={},
+            page_contents_schema_version=(
+                feconf.CURRENT_SUBTOPIC_PAGE_CONTENTS_SCHEMA_VERSION),
             language_code='en'
         )
         # We check that subtopic page has not been saved before calling
@@ -162,3 +198,12 @@ class SubtopicPageCommitLogEntryModelUnitTest(test_utils.GenericTestBase):
             subtopic_page_commit_log_entry.id,
             'subtopicpage-entity_id-1'
         )
+
+
+class TopicRightsModelUnitTests(test_utils.GenericTestBase):
+    """Tests the TopicRightsModel class."""
+
+    def test_get_deletion_policy(self):
+        self.assertEqual(
+            topic_models.TopicRightsModel.get_deletion_policy(),
+            base_models.DELETION_POLICY.KEEP_IF_PUBLIC)
